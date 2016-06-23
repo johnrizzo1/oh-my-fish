@@ -41,6 +41,7 @@ Options:
   --help                  Show this help message
   --offline               Offline install
   --prefix=<path>         Install to a specific path (default is $PREFIX)
+  --uninstall             Uninstall existing installation instead of installing
   --yes, -y               Disable interactive questions
 "
         return 0
@@ -60,18 +61,19 @@ Options:
     set -e argv[1]
   end
 
-  # Noninteractive
-  isatty
-    or set -g NONINTERACTIVE
+  assert-cmds
+  assert-interactive
 
   set -g OMF_PATH "$PREFIX/omf"
 
   if test -d "$OMF_PATH"
-    report error "Aborting: Existing installation detected at $OMF_PATH."
-  end
+    echo "existing installation detected at $OMF_PATH"
 
-  if not type -q git
-    report error "Aborting: Installation requires Git."
+    if confirm "Would you like to remove the existing installation?"
+      uninstall-omf
+    else
+      exit 1
+    end
   end
 
   if not fish_version_compatible
@@ -84,26 +86,10 @@ Options:
     or report error "Oh My Fish installation failed.\n\nIf you think that it's a bug, please open an\nissue with the complete installation log here:\n\nhttp://github.com/oh-my-fish/oh-my-fish/issues"
 
   report success "Installation successful!"
-  set -q CI; or exec fish < /dev/tty
+  set -q NONINTERACTIVE; or exec fish < /dev/tty
   return 0
 end
 
-function report -a what message
-  switch $what
-  case 'info'
-    set_color blue
-  case 'success'
-    set_color green
-  case 'error'
-    set_color red
-    printf "error: $message\n"
-    set_color normal
-    exit 1
-  end
-
-  printf "$message\n"
-  set_color normal
-end
 
 function fish_version_compatible
   set -q FISH_VERSION; or set -l FISH_VERSION $version
@@ -133,6 +119,17 @@ function backup-file -a file_path
 
   return 0
 end
+
+
+# Download OMF from GitHub
+function download-omf
+  report progress "Cloning $OMF_REPO_BRANCH from $git_uri..."
+
+  if not git clone -q --depth 1 -b $OMF_REPO_BRANCH $git_uri "$OMF_PATH"
+    report error "Error cloning repository!"
+  end
+end
+
 
 function install-omf
   report progress "Installing Oh My Fish to $OMF_PATH..."
@@ -167,6 +164,15 @@ function install-omf
   end
 end
 
+
+function uninstall-omf
+  echo "Warning: This will uninstall Oh My Fish and all plugins and themes installed in '$OMF_PATH'.
+Your configuration will not be modified. You will need to remove any Oh My Fish startup code from '$FISH_CONFIG/config.fish'."
+
+  confirm-yes "Are you sure you want to continue?"
+end
+
+
 function create-config
   set fish_config_file "$FISH_CONFIG/config.fish"
 
@@ -198,9 +204,88 @@ function create-config
   fish -c "omf install"
 end
 
-# Silent wrapper around set_color
-function set_color
-  builtin set_color $argv ^ /dev/null
+
+# Checks if OMF is already installed
+function check-existing-install
 end
+
+
+# Assert that all tools we need are available
+function assert-cmds
+  set cmds basename cp cut date dirname fish git mkdir mv sed
+
+  for cmd in $cmds
+    if not type -q $cmd
+      abort "command '$cmd' not found"
+    end
+  end
+end
+
+
+function assert-interactive
+  set -q NONINTERACTIVE
+    and return
+
+  test -c /dev/tty -a -r /dev/tty
+    and echo -n > /dev/tty ^ /dev/null
+    or abort "running interactively, but can't read from TTY (try running with --yes)"
+end
+
+
+function report -a what message
+  switch $what
+  case 'info'
+    set_color blue
+  case 'success'
+    set_color green
+  case 'error'
+    set_color red
+    printf "error: $message\n"
+    set_color normal
+    exit 1
+  end
+
+  printf "$message\n"
+  set_color normal
+end
+
+
+# Aborts the installer and displays an error
+function abort -a message
+  set_color red ^ /dev/null
+
+  if test -n "$message"
+    echo "aborting: $message"
+  else
+    echo "aborting"
+  end
+
+  set_color normal ^ /dev/null
+  exit 2
+end
+
+
+# Asks the user for confirmation
+function confirm -a message
+  if set -q NONINTERACTIVE
+    return 0
+  end
+
+  echo -n "$message (y/n): "
+  read -l answer < /dev/tty
+    or abort "failed to read from TTY"
+
+  if test "$answer" != y -a "$answer" != Y -a "$answer" != yes
+    return 1
+  end
+end
+
+
+# Asks the user for a confirmation or exits
+function confirm-yes -a message
+  confirm "$message"
+    or abort
+end
+
 
 main $argv

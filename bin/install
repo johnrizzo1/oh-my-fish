@@ -1,26 +1,16 @@
 #!/usr/bin/env fish
 # Oh My Fish installer. See `install --help` for usage.
-#
-# USAGE
-#   #1: curl -L https://github.com/oh-my-fish/oh-my-fish/raw/master/bin/install | fish
-#   #2: curl -L https://github.com/oh-my-fish/oh-my-fish/raw/master/bin/install > install; and fish install
-#   #3: env OMF_CONFIG=~/.omf curl -L https://github.com/oh-my-fish/oh-my-fish/raw/master/bin/install | fish
-#
-# ENV
-#   OMF_REPO_URI      Oh My Fish source git repository
-#   OMF_REPO_BRANCH   Oh My Fish source repository branch
 
+# Set environment options.
 set -q OMF_REPO_URI;    or set OMF_REPO_URI "https://github.com/oh-my-fish/oh-my-fish"
 set -q OMF_REPO_BRANCH; or set OMF_REPO_BRANCH "master"
-
-set OMF_FISH_MIN_VER 2 2 0
 
 
 function main
   # Set default settings
   set -q XDG_DATA_HOME
-    and set -g PREFIX "$XDG_DATA_HOME"
-    or set -g PREFIX "$HOME/.local/share"
+    and set -g OMF_PATH "$XDG_DATA_HOME/omf"
+    or set -g OMF_PATH "$HOME/.local/share/omf"
 
   set -q XDG_CONFIG_HOME
     and set -g CONFIG_PATH "$XDG_CONFIG_HOME"
@@ -29,7 +19,10 @@ function main
   set -g OMF_CONFIG "$CONFIG_PATH/omf"
   set -g FISH_CONFIG "$CONFIG_PATH/fish"
 
-  # Parse args
+  # Ensure repository URL ends with .git
+  set OMF_REPO_URI (echo $OMF_REPO_URI | command sed 's/\.git//').git
+
+  # Parse command args
   while set -q argv[1]
     switch "$argv[1]"
       case --help -h '/?'
@@ -37,151 +30,197 @@ function main
   Install Oh My Fish
 
 Options:
-  --config=<path>         Put config in a specific path (default is $OMF_CONFIG)
-  --help                  Show this help message
-  --offline               Offline install
-  --prefix=<path>         Install to a specific path (default is $PREFIX)
-  --uninstall             Uninstall existing installation instead of installing
-  --yes, -y               Disable interactive questions
+  --config=<path>         Put config in a specific path (default is $OMF_CONFIG).
+  --help, -h              Show this help message.
+  --noninteractive        Disable interactive questions (assume no, use with --yes to assume yes).
+  --offline[=<path>]      Offline install, optionally specifying a tar or directory to use.
+  --path=<path>           Use a specific install path (default is $OMF_PATH).
+  --uninstall             Uninstall existing installation instead of installing.
+  --yes, -y               Assume yes for interactive questions.
 "
         return 0
 
       case '--config=*'
-        echo "$argv[1]" | cut -d= -f2 | read -g OMF_CONFIG
+        echo "$argv[1]" | command cut -d= -f2 | read -g OMF_CONFIG
+
+      case --noninteractive
+        set -g NONINTERACTIVE
 
       case --offline
         set -g OFFLINE
 
-      case '--prefix=*'
-        echo "$argv[1]" | cut -d= -f2 | read -g PREFIX
+      case '--offline=*'
+        set -g OFFLINE
+        echo "$argv[1]" | command cut -d= -f2 | read -g OFFLINE_PATH
+
+      case '--path=*'
+        echo "$argv[1]" | command cut -d= -f2 | read -g OMF_PATH
+
+      case --uninstall
+        set -g UNINSTALL
 
       case --yes -y
-        set -g NONINTERACTIVE
+        set -g ASSUME_YES
+
+      case '*'
+        abort "Unrecognized option '$argv[1]'"
     end
     set -e argv[1]
   end
 
-  assert-cmds
-  assert-interactive
+  # Ensure the environment meets all of the requirements.
+  assert_cmds
+  assert_fish_version_compatible
+  assert_git_version_compatible
+  assert_interactive
 
-  set -g OMF_PATH "$PREFIX/omf"
+  # If the user wants to uninstall, jump to uninstallation and exit.
+  if set -q UNINSTALL
+    uninstall_omf
+    return
+  end
 
+  # Check if OMF is already installed.
   if test -d "$OMF_PATH"
-    echo "existing installation detected at $OMF_PATH"
+    say "Existing installation detected at $OMF_PATH"
 
-    if confirm "Would you like to remove the existing installation?"
-      uninstall-omf
-    else
-      exit 1
-    end
+    confirm_yes "Would you like to remove the existing installation?"
+    uninstall_omf
   end
 
-  if not fish_version_compatible
-    set -l minimum_version_string (echo $OMF_FISH_MIN_VER | sed 's/ /./g')
-    report error "Aborting: Detected fish $version, but Oh My Fish requires fish $minimum_version_string or greater."
-  end
+  # Begin the install process.
+  install_omf
+    and create_config
+    or abort "Oh My Fish installation failed.\n\nIf you think that it's a bug, please open an\nissue with the complete installation log here:\n\nhttp://github.com/oh-my-fish/oh-my-fish/issues"
 
-  install-omf
-    and create-config
-    or report error "Oh My Fish installation failed.\n\nIf you think that it's a bug, please open an\nissue with the complete installation log here:\n\nhttp://github.com/oh-my-fish/oh-my-fish/issues"
+  # We made it!
+  say "Installation successful!"
 
-  report success "Installation successful!"
-  set -q NONINTERACTIVE; or exec fish < /dev/tty
-  return 0
-end
-
-
-function fish_version_compatible
-  set -q FISH_VERSION; or set -l FISH_VERSION $version
-  set -l major (echo $FISH_VERSION | cut -d. -f1)
-  set -l minor (echo $FISH_VERSION | cut -d. -f2)
-
-  return (test $major = $OMF_FISH_MIN_VER[1] -a $minor -ge $OMF_FISH_MIN_VER[2])
-end
-
-
-function backup-file -a file_path
-  test -e "$file_path"; or return 1
-
-  set -l path (dirname $file_path)
-  set -l file (basename $file_path)
-  set -l name (echo $file | cut -d. -f1)
-
-  set -l timestamp (date +%s)
-  set -l backup_file "$path/$name.$timestamp.copy"
-
-  report progress "Existent $file found at $path"
-  report progress "↳ Moving to $backup_file"
-
-  if not mv "$file_path" $backup_file 2>/dev/null
-    report error "Aborting: Could not backup $file_path"
-  end
+  # Open a brand new shell if we are in interactive mode.
+  set -q NONINTERACTIVE
+    or exec fish < /dev/tty
 
   return 0
 end
 
 
-# Download OMF from GitHub
-function download-omf
-  report progress "Cloning $OMF_REPO_BRANCH from $git_uri..."
-
-  if not git clone -q --depth 1 -b $OMF_REPO_BRANCH $git_uri "$OMF_PATH"
-    report error "Error cloning repository!"
-  end
-end
-
-
-function install-omf
-  report progress "Installing Oh My Fish to $OMF_PATH..."
+# Installs Oh My Fish.
+function install_omf
+  say "Installing Oh My Fish to $OMF_PATH..."
 
   # Prepare paths
-  mkdir -p "$PREFIX"
+  command mkdir -p (dirname "$OMF_PATH")
 
-  # Grant repository URL ends with .git
-  set git_uri (echo $OMF_REPO_URI | sed 's/\.git//').git
-
+  # Install step
   if set -q OFFLINE
-    dirname (dirname (status -f)) | read local_repo
-
-    if not test -d "$local_repo"
-      report error "Could not access local installation"
-    end
-
-    cp -r "$local_repo" "$OMF_PATH"
+    install_offline
   else
-    report progress "Cloning $OMF_REPO_BRANCH from $git_uri..."
-    if not git clone -q --depth 1 -b $OMF_REPO_BRANCH $git_uri "$OMF_PATH"
-      report error "Error cloning repository!"
+    install_from_github
+  end
+end
+
+
+# Downloads and installs the framework from GitHub.
+function install_from_github
+  say "Cloning $OMF_REPO_BRANCH from $OMF_REPO_URI..."
+
+  if not command git clone -q --depth 1 -b $OMF_REPO_BRANCH $OMF_REPO_URI "$OMF_PATH"
+    abort "Error cloning repository!"
+  end
+
+  set_git_remotes
+end
+
+
+# Install the framework from an offline copy of the source.
+function install_offline
+  # Prepare the path
+  if set -q OFFLINE_PATH
+    # Make sure the given path exists
+    if not test -e "$OFFLINE_PATH"
+      abort "Local installation does not exist"
+    end
+  else
+    # If no path was set, check if the installer is running inside of the source directory.
+    set -l path (dirname (dirname (status -f)))
+
+    if dir_is_install "$path"
+      set OFFLINE_PATH "$path"
+    # Try using the current working directory as the source.
+    else if dir_is_install "$PWD"
+      set OFFLINE_PATH "$PWD"
+    else
+      # We tried our best.
+      abort "Could not find local installation"
     end
   end
 
-  set git_upstream (git --git-dir "$OMF_PATH/.git" --work-tree "$OMF_PATH" config remote.upstream.url)
+  # Check if the path is some sort of tar.
+  if test -f "$OFFLINE_PATH"
+    say "Offline path is a file, assuming tar archive..."
+
+    command tar -xf "$OFFLINE_PATH" -C "$OMF_PATH"
+      or abort "Could not extract tar file $OFFLINE_PATH"
+
+    return
+  end
+
+  # At this point, path must be a directory.
+  if not test -d "$OFFLINE_PATH"
+    abort "$OFFLINE_PATH is not a directory"
+  end
+
+  # Copy the source into the install location.
+  command cp -r "$OFFLINE_PATH" "$OMF_PATH"
+    or abort "Failed to copy source!"
+
+  # Set up Git remotes only if the offline install is a Git repository.
+  test -d "$OMF_PATH/.git"
+    and set_git_remotes
+
+  return 0
+end
+
+
+# Set upstream remotes on the framework Git repository.
+function set_git_remotes
+  set git_upstream (command git --git-dir "$OMF_PATH/.git" --work-tree "$OMF_PATH" config remote.upstream.url)
 
   if test -z "$git_upstream"
-    git --git-dir "$OMF_PATH/.git" --work-tree "$OMF_PATH" remote add upstream $git_uri
+    command git --git-dir "$OMF_PATH/.git" --work-tree "$OMF_PATH" remote add upstream $OMF_REPO_URI
   else
-    git --git-dir "$OMF_PATH/.git" --work-tree "$OMF_PATH" remote set-url upstream $git_uri
+    command git --git-dir "$OMF_PATH/.git" --work-tree "$OMF_PATH" remote set-url upstream $OMF_REPO_URI
   end
 end
 
 
-function uninstall-omf
-  echo "Warning: This will uninstall Oh My Fish and all plugins and themes installed in '$OMF_PATH'.
-Your configuration will not be modified. You will need to remove any Oh My Fish startup code from '$FISH_CONFIG/config.fish'."
+# Uninstalls an existing OMF installation.
+function uninstall_omf
+  dir_is_install "$OMF_PATH"
+    or abort "No installation detected at $OMF_PATH"
 
-  confirm-yes "Are you sure you want to continue?"
+  say "Warning: This will uninstall Oh My Fish and all plugins and themes installed in $OMF_PATH. Your configuration will not be modified. You will need to remove any Oh My Fish startup code from $FISH_CONFIG/config.fish."
+
+  confirm_yes "Are you sure you want to continue?"
+  say "Uninstalling from $OMF_PATH..."
+
+  command rm -rf "$OMF_PATH/.git"
+    and command rm -r "$OMF_PATH"
+    and say "Uninstall complete"
+    or abort "Uninstall failed"
 end
 
 
-function create-config
+# Creates user configuration files.
+function create_config
   set fish_config_file "$FISH_CONFIG/config.fish"
 
-  backup-file "$fish_config_file"
-    or mkdir -p "$FISH_CONFIG"
+  backup_file "$fish_config_file"
+    or command mkdir -p "$FISH_CONFIG"
 
-  backup-file "$FISH_CONFIG/functions/fish_prompt.fish"
+  backup_file "$FISH_CONFIG/functions/fish_prompt.fish"
 
-  report progress "Adding startup code to fish config file..."
+  say "Adding startup code to fish config file..."
 
   set template "templates/config.fish"
   set replacements "s|{{OMF_CONFIG}}|$OMF_CONFIG|"
@@ -192,97 +231,136 @@ function create-config
 
   sed "$replacements" "$OMF_PATH/$template" > "$fish_config_file"
 
-  report progress "Building Oh My Fish configuration..."
+  say "Building Oh My Fish configuration..."
 
   if not test -d "$OMF_CONFIG"
-    mkdir -p "$OMF_CONFIG"
+    command mkdir -p "$OMF_CONFIG"
   end
 
   test -f "$OMF_CONFIG/bundle"; or echo "theme default" > "$OMF_CONFIG/bundle"
   test -f "$OMF_CONFIG/theme";  or echo "default" > "$OMF_CONFIG/theme"
 
+  # Install plugins
   fish -c "omf install"
 end
 
 
-# Checks if OMF is already installed
-function check-existing-install
+# Makes a backup of a given file.
+function backup_file -a file_path
+  test -e "$file_path"; or return 1
+
+  set -l path (dirname $file_path)
+  set -l file (basename $file_path)
+  set -l name (echo $file | command cut -d. -f1)
+
+  set -l timestamp (date +%s)
+  set -l backup_file "$path/$name.$timestamp.copy"
+
+  say "Existent $file found at $path"
+  say "↳ Moving to $backup_file"
+
+  if not mv "$file_path" $backup_file 2>/dev/null
+    abort "Could not backup $file_path"
+  end
+
+  return 0
 end
 
 
-# Assert that all tools we need are available
-function assert-cmds
-  set cmds basename cp cut date dirname fish git mkdir mv sed
+# Checks if a path looks like an OMF install.
+function dir_is_install -a path
+  test -n "$path"
+    and test -d "$path"
+    and test -d "$path/pkg/omf"
+end
+
+
+# Assert that all tools we need are available.
+function assert_cmds
+  set cmds basename cp cut date dirname fish fold git mkdir mv sed sort tar
 
   for cmd in $cmds
-    if not type -q $cmd
-      abort "command '$cmd' not found"
-    end
+    type -q $cmd
+      or abort "Command '$cmd' not found"
   end
 end
 
 
-function assert-interactive
+# Assert that the minimum required version of Fish is installed.
+function assert_fish_version_compatible
+  set -q FISH_VERSION; or set -l FISH_VERSION $version
+
+  if not compare_version_compatible 2.2.0 $FISH_VERSION
+    abort "Fish version 2.2.0 or greater required; you have $FISH_VERSION"
+  end
+end
+
+
+# Assert that the minimum required version of Git is installed.
+function assert_git_version_compatible
+  set -l git_version (command git --version | command cut -d' ' -f3)
+
+  if not compare_version_compatible 1.9.5 $git_version
+    abort "Git version 1.9.5 or greater required; you have $git_version"
+  end
+end
+
+
+# Tests if the right-hand side version is equal to or greater than the left-hand side version.
+function compare_version_compatible -a lhs rhs
+  test "$lhs" = (printf "$lhs\n$rhs\n" | command sort -t '.' -k 1,1 -k 2,2 -k 3,3 -k 4,4 -g)[1]
+end
+
+
+# Ensures the keyboard is readable if in interactive mode.
+function assert_interactive
   set -q NONINTERACTIVE
     and return
 
   test -c /dev/tty -a -r /dev/tty
     and echo -n > /dev/tty ^ /dev/null
-    or abort "running interactively, but can't read from TTY (try running with --yes)"
+    or abort "Running interactively, but can't read from tty (try running with --noninteractive)"
 end
 
 
-function report -a what message
-  switch $what
-  case 'info'
-    set_color blue
-  case 'success'
-    set_color green
-  case 'error'
-    set_color red
-    printf "error: $message\n"
-    set_color normal
-    exit 1
-  end
-
-  printf "$message\n"
-  set_color normal
+# Print a message to the user.
+function say -a message
+  printf "$message\n" | command fold -s -w 80
 end
 
 
-# Aborts the installer and displays an error
+# Aborts the installer and displays an error.
 function abort -a message
-  set_color red ^ /dev/null
-
   if test -n "$message"
-    echo "aborting: $message"
+    printf "%sInstall aborted: $message%s\n" (set_color red ^ /dev/null) (set_color normal ^ /dev/null) >&2
   else
-    echo "aborting"
+    printf "%sInstall aborted%s\n" (set_color red ^ /dev/null) (set_color normal ^ /dev/null) >&2
   end
 
-  set_color normal ^ /dev/null
   exit 2
 end
 
 
-# Asks the user for confirmation
+# Asks the user for confirmation.
 function confirm -a message
-  if set -q NONINTERACTIVE
-    return 0
-  end
+  # Return true if we assume yes for all questions.
+  set -q ASSUME_YES
+    and return 0
 
-  echo -n "$message (y/n): "
+  # Return false if we can't ask the question.
+  set -q NONINTERACTIVE
+    and return 1
+
+  printf "%s$message (y/n): %s" (set_color yellow ^ /dev/null) (set_color normal ^ /dev/null)
   read -l answer < /dev/tty
-    or abort "failed to read from TTY"
+    or abort "Failed to read from tty"
 
-  if test "$answer" != y -a "$answer" != Y -a "$answer" != yes
-    return 1
-  end
+  not test "$answer" != y -a "$answer" != Y -a "$answer" != yes
 end
 
 
-# Asks the user for a confirmation or exits
-function confirm-yes -a message
+# Asks the user for a confirmation or aborts.
+function confirm_yes -a message
   confirm "$message"
     or abort
 end
